@@ -1,0 +1,76 @@
+{
+  "name": "raycast-planner",
+  "title": "Planner",
+  "description": "Google Calendar events in Raycast with local notes, overlay edits, and Meet shortcuts",
+  "icon": "assets/icon.svg",
+  "license": "MIT",
+  "platforms": [
+    "macOS"
+  ],
+  "categories": [
+    "Utilities"
+  ],
+  "keywords": [
+    "calendar",
+    "google",
+    "schedule",
+    "planner",
+    "meet"
+  ],
+  "commands": [
+    {
+      "name": "my-schedule",
+      "title": "My Plan",
+      "icon": "plan.png",
+      "subtitle": "Planner",
+      "description": "Browse today's schedule with local notes and quick actions",
+      "mode": "view"
+    },
+    {
+      "name": "my-memo",
+      "title": "My Memo",
+      "icon": "memo.png",
+      "subtitle": "Planner",
+      "description": "Open and edit the shared memo directly",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "gwsPath",
+      "type": "textfield",
+      "required": false,
+      "title": "gws Path",
+      "description": "Path to the gws executable",
+      "default": "gws",
+      "placeholder": "gws"
+    },
+    {
+      "name": "calendarId",
+      "type": "textfield",
+      "required": true,
+      "title": "Calendar ID",
+      "description": "Google Calendar ID to sync from",
+      "default": "primary",
+      "placeholder": "primary"
+    }
+  ],
+  "scripts": {
+    "dev": "npx ray develop",
+    "build": "npx ray build -e dist",
+    "check": "pnpm run lint && pnpm run typecheck",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "tsc --noEmit"
+  },
+  "packageManager": "pnpm@10.15.0",
+  "dependencies": {
+    "@raycast/api": "1.104.9"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.6",
+    "@types/node": "22.13.10",
+    "@types/react": "19.0.10",
+    "typescript": "5.9.3"
+  }
+}
