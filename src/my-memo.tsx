@@ -10,7 +10,7 @@ import {
   showToast,
   Toast,
 } from "@raycast/api";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { getDayRange } from "./date";
 import { normalizeMemoForSave, renderMemoMarkdown } from "./memo-markdown";
@@ -24,15 +24,17 @@ import {
 const Command = () => {
   const { dayKey, label } = getDayRange(new Date());
   const [isLoading, setIsLoading] = useState(true);
-  const [note, setNote] = useState("");
   const [savedNote, setSavedNote] = useState("");
+  const [previewNote, setPreviewNote] = useState("");
   const [isShowingPreview, setIsShowingPreview] = useState(false);
+  const noteRef = useRef("");
   const openPlannerFile = () => void ensurePlannerDataFile().then(open);
 
   useEffect(() => {
     void loadSharedMemo(dayKey).then((value) => {
-      setNote(value);
       setSavedNote(value);
+      setPreviewNote(value);
+      noteRef.current = value;
       setIsLoading(false);
     });
   }, [dayKey]);
@@ -55,7 +57,7 @@ const Command = () => {
             />
           </ActionPanel>
         }
-        markdown={renderMemoMarkdown(note)}
+        markdown={renderMemoMarkdown(previewNote)}
         navigationTitle={`${label} のメモプレビュー`}
       />
     );
@@ -69,15 +71,24 @@ const Command = () => {
             title="保存"
             icon={Icon.Checkmark}
             shortcut={{ modifiers: ["cmd"], key: "s" }}
-            onSubmit={() =>
-              void saveSharedMemo(dayKey, savedNote, note, setSavedNote)
+            onSubmit={(values) =>
+              void saveSharedMemo(
+                dayKey,
+                savedNote,
+                values.memo,
+                setSavedNote,
+                setPreviewNote,
+              )
             }
           />
           <Action
             title="プレビュー"
             icon={Icon.Eye}
             shortcut={{ modifiers: ["cmd", "shift"], key: "v" }}
-            onAction={() => setIsShowingPreview(true)}
+            onAction={() => {
+              setPreviewNote(noteRef.current);
+              setIsShowingPreview(true);
+            }}
           />
           <Action
             title="planner.md を開く"
@@ -89,7 +100,17 @@ const Command = () => {
       isLoading={isLoading}
       navigationTitle={`${label} のメモ`}
     >
-      <Form.TextArea id="memo" title="メモ" value={note} onChange={setNote} />
+      {!isLoading ? (
+        <Form.TextArea
+          defaultValue={savedNote}
+          enableMarkdown
+          id="memo"
+          title="メモ"
+          onChange={(value) => {
+            noteRef.current = value;
+          }}
+        />
+      ) : null}
     </Form>
   );
 };
@@ -103,6 +124,7 @@ const saveSharedMemo = async (
   previousNote: string,
   nextNote: string,
   onSaved: (note: string) => void,
+  setPreviewNote: (note: string) => void,
 ) => {
   const normalizedNote = await normalizeMemoForSave(nextNote);
   await saveSharedNote(dayKey, normalizedNote);
@@ -113,6 +135,7 @@ const saveSharedMemo = async (
     timestamp: new Date().toISOString(),
   });
   onSaved(normalizedNote);
+  setPreviewNote(normalizedNote);
   await showToast({
     style: Toast.Style.Success,
     title: "メモを保存しました",
