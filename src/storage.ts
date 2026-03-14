@@ -673,7 +673,7 @@ const normalizeNewlines = (text: string): string =>
   text.replace(/\r\n?/g, "\n");
 
 const daySectionPattern = () =>
-  /^## (\d{4}-\d{2}-\d{2}) \([^)]+\)\n([\s\S]*?)(?=^## \d{4}-\d{2}-\d{2} \(|(?![\s\S]))/gm;
+  /^## (\d{4}-\d{2}-\d{2})(?: \([^)]+\))?\n([\s\S]*?)(?=^## \d{4}-\d{2}-\d{2}(?: \([^)]+\))?\n|(?![\s\S]))/gm;
 
 const noteSectionPattern = () =>
   new RegExp(
