@@ -30,6 +30,7 @@ import { mergeEventsWithOverlay } from "./planner";
 import {
   appendSharedNoteHistory,
   clearCachedEvents,
+  ensurePlannerDataFile,
   loadAutoOpenState,
   loadLocalEvents,
   loadOverlayMap,
@@ -174,6 +175,7 @@ const Command = () => {
     setTargetDate((current) => shiftDate(current, -1));
   const moveNextDay = () => setTargetDate((current) => shiftDate(current, 1));
   const moveToday = () => setTargetDate(new Date());
+  const openPlannerFile = () => void ensurePlannerDataFile().then(open);
   const openSharedNoteHistory = () => push(<SharedNoteHistoryList />);
   const openCreateForm = () =>
     push(
@@ -239,6 +241,11 @@ const Command = () => {
           title="メモ更新履歴"
           icon={Icon.Clock}
           onAction={openSharedNoteHistory}
+        />
+        <Action
+          title="planner.md を開く"
+          icon={Icon.Finder}
+          onAction={openPlannerFile}
         />
       </ActionPanel.Section>
       <ActionPanel.Section title="全体">

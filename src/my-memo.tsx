@@ -6,6 +6,7 @@ import {
   Icon,
   LaunchType,
   launchCommand,
+  open,
   showToast,
   Toast,
 } from "@raycast/api";
@@ -15,6 +16,7 @@ import { getDayRange } from "./date";
 import { normalizeMemoForSave, renderMemoMarkdown } from "./memo-markdown";
 import {
   appendSharedNoteHistory,
+  ensurePlannerDataFile,
   loadSharedNote,
   saveSharedNote,
 } from "./storage";
@@ -25,6 +27,7 @@ const Command = () => {
   const [note, setNote] = useState("");
   const [savedNote, setSavedNote] = useState("");
   const [isShowingPreview, setIsShowingPreview] = useState(false);
+  const openPlannerFile = () => void ensurePlannerDataFile().then(open);
 
   useEffect(() => {
     void loadSharedMemo(dayKey).then((value) => {
@@ -44,6 +47,11 @@ const Command = () => {
               icon={Icon.Pencil}
               shortcut={{ modifiers: ["cmd"], key: "e" }}
               onAction={() => setIsShowingPreview(false)}
+            />
+            <Action
+              title="planner.md を開く"
+              icon={Icon.Finder}
+              onAction={openPlannerFile}
             />
           </ActionPanel>
         }
@@ -70,6 +78,11 @@ const Command = () => {
             icon={Icon.Eye}
             shortcut={{ modifiers: ["cmd", "shift"], key: "v" }}
             onAction={() => setIsShowingPreview(true)}
+          />
+          <Action
+            title="planner.md を開く"
+            icon={Icon.Finder}
+            onAction={openPlannerFile}
           />
         </ActionPanel>
       }
