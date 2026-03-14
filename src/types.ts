@@ -60,12 +60,13 @@ export type AutoOpenExecutionState = {
 
 export type PlannerPreferences = {
   calendarId: string;
+  enableCalendarSync: boolean;
   gwsPath: string;
 };
 
 export type FetchResult = {
   events: GoogleCalendarEvent[];
-  source: "cache" | "remote";
+  source: "cache" | "local" | "remote";
 };
 
 export type SharedNoteHistoryEntry = {

@@ -37,6 +37,14 @@
   ],
   "preferences": [
     {
+      "name": "enableCalendarSync",
+      "type": "checkbox",
+      "required": false,
+      "title": "Enable Calendar Sync",
+      "label": "Sync with Google Calendar",
+      "default": true
+    },
+    {
       "name": "gwsPath",
       "type": "textfield",
       "required": false,
@@ -48,7 +56,7 @@
     {
       "name": "calendarId",
       "type": "textfield",
-      "required": true,
+      "required": false,
       "title": "Calendar ID",
       "description": "Google Calendar ID to sync from",
       "default": "primary",

@@ -41,6 +41,7 @@ import {
   saveSharedNote,
 } from "./storage";
 import type {
+  FetchResult,
   LocalPlannerEvent,
   PlannerEventViewModel,
   PlannerOverlay,
@@ -56,7 +57,13 @@ const Command = () => {
   const [targetDate, setTargetDate] = useState(new Date());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const [lastSource, setLastSource] = useState<"cache" | "remote">("remote");
+  const [lastSource, setLastSource] = useState<"cache" | "local" | "remote">(
+    preferences.enableCalendarSync ? "remote" : "local",
+  );
+  const canSyncCalendar =
+    preferences.enableCalendarSync &&
+    preferences.gwsPath.trim() &&
+    preferences.calendarId.trim();
 
   const load = async (forceRefresh = false, date = targetDate) => {
     setIsLoading(true);
@@ -65,7 +72,12 @@ const Command = () => {
 
     try {
       const [result, overlayMap, localEvents, note] = await Promise.all([
-        fetchCalendarEvents(preferences, date, { forceRefresh }),
+        canSyncCalendar
+          ? fetchCalendarEvents(preferences, date, { forceRefresh })
+          : Promise.resolve<FetchResult>({
+              events: [],
+              source: "local",
+            }),
         loadOverlayMap(),
         loadLocalEvents(),
         loadSharedNote(dayKey),
@@ -145,11 +157,19 @@ const Command = () => {
     return grouped;
   }, [events]);
   const navigationTitle = useMemo(() => {
-    const suffix = lastSource === "cache" ? "cached" : "live";
+    const suffix =
+      lastSource === "cache"
+        ? "cached"
+        : lastSource === "local"
+          ? "local"
+          : "live";
     return `${label} (${suffix})`;
   }, [label, lastSource]);
   const reload = () => void load(true);
-  const sync = () => void handleSync(preferences, targetDate, load);
+  const sync = () =>
+    canSyncCalendar
+      ? void handleSync(preferences, targetDate, load)
+      : undefined;
   const movePreviousDay = () =>
     setTargetDate((current) => shiftDate(current, -1));
   const moveNextDay = () => setTargetDate((current) => shiftDate(current, 1));
@@ -180,14 +200,6 @@ const Command = () => {
       icon={Icon.Plus}
       shortcut={{ modifiers: ["cmd"], key: "n" }}
       onAction={openCreateForm}
-    />
-  );
-  const syncAction = (
-    <Action
-      title="カレンダーと同期"
-      icon={Icon.ArrowClockwise}
-      shortcut={{ modifiers: ["cmd"], key: "r" }}
-      onAction={sync}
     />
   );
   const dateMoveActions = (
@@ -231,7 +243,14 @@ const Command = () => {
       </ActionPanel.Section>
       <ActionPanel.Section title="全体">
         {addScheduleAction}
-        {syncAction}
+        {canSyncCalendar ? (
+          <Action
+            title="カレンダーと同期"
+            icon={Icon.ArrowClockwise}
+            shortcut={{ modifiers: ["cmd"], key: "r" }}
+            onAction={sync}
+          />
+        ) : null}
         {dateMoveActions}
       </ActionPanel.Section>
     </>
@@ -304,10 +323,12 @@ const Command = () => {
         </List.Section>
       ) : null}
       <List.Section>
-        {!isLoading && !preferences.gwsPath.trim() ? (
+        {!isLoading &&
+        preferences.enableCalendarSync &&
+        (!preferences.gwsPath.trim() || !preferences.calendarId.trim()) ? (
           <List.EmptyView
-            title="gws 未設定"
-            description="Extension Preferences で gwsPath を設定してください"
+            title="カレンダー未設定"
+            description="Extension Preferences で gwsPath と calendarId を設定してください"
             actions={<ActionPanel>{addScheduleAction}</ActionPanel>}
           />
         ) : null}
