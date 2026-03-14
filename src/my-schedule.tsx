@@ -37,6 +37,7 @@ import {
   loadSharedNote,
   loadSharedNoteHistory,
   saveAutoOpenState,
+  saveFetchedGoogleEvents,
   saveLocalEvents,
   saveOverlayMap,
   saveSharedNote,
@@ -93,6 +94,9 @@ const Command = () => {
           ? dayKey >= createdAtDayKey
           : dayKey >= startDayKey && dayKey <= endDayKey;
       });
+      if (canSyncCalendar) {
+        await saveFetchedGoogleEvents(dayKey, result.events);
+      }
 
       const nextEvents = mergeEventsWithOverlay(
         result.events,
