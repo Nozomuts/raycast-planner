@@ -3,6 +3,7 @@
   "title": "Planner",
   "description": "Google Calendar events in Raycast with local notes, overlay edits, and Meet shortcuts",
   "icon": "assets/icon.svg",
+  "author": "Nozomuts",
   "license": "MIT",
   "platforms": [
     "macOS"
@@ -37,14 +38,6 @@
   ],
   "preferences": [
     {
-      "name": "enableCalendarSync",
-      "type": "checkbox",
-      "required": false,
-      "title": "Enable Calendar Sync",
-      "label": "Sync with Google Calendar",
-      "default": true
-    },
-    {
       "name": "gwsPath",
       "type": "textfield",
       "required": false,
@@ -58,7 +51,7 @@
       "type": "textfield",
       "required": false,
       "title": "Calendar ID",
-      "description": "Google Calendar ID to sync from",
+      "description": "Google Calendar ID to sync from. Leave empty to disable calendar sync.",
       "default": "primary",
       "placeholder": "primary"
     }

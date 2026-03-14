@@ -10,7 +10,7 @@
 type ExtensionPreferences = {
   /** gws Path - Path to the gws executable */
   "gwsPath": string,
-  /** Calendar ID - Google Calendar ID to sync from */
+  /** Calendar ID - Google Calendar ID to sync from. Leave empty to disable calendar sync. */
   "calendarId": string
 }
 

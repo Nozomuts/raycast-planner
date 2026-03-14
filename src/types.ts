@@ -60,7 +60,6 @@ export type AutoOpenExecutionState = {
 
 export type PlannerPreferences = {
   calendarId: string;
-  enableCalendarSync: boolean;
   gwsPath: string;
 };
 

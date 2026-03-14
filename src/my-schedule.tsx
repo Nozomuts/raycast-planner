@@ -58,12 +58,12 @@ const Command = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [lastSource, setLastSource] = useState<"cache" | "local" | "remote">(
-    preferences.enableCalendarSync ? "remote" : "local",
+    preferences.gwsPath.trim() && preferences.calendarId.trim()
+      ? "remote"
+      : "local",
   );
   const canSyncCalendar =
-    preferences.enableCalendarSync &&
-    preferences.gwsPath.trim() &&
-    preferences.calendarId.trim();
+    preferences.gwsPath.trim() && preferences.calendarId.trim();
 
   const load = async (forceRefresh = false, date = targetDate) => {
     setIsLoading(true);
@@ -256,6 +256,32 @@ const Command = () => {
     </>
   );
 
+  if (!isLoading && error) {
+    return (
+      <List
+        actions={<ActionPanel>{sharedActionSections}</ActionPanel>}
+        isShowingDetail
+        navigationTitle={navigationTitle}
+        searchBarPlaceholder="⌘← 前日, ⌘→ 翌日, ⌘↑ 今日, ⌘N 追加, ⌘D 完了, ⌘M メモ編集, ⌘R 同期, ⌘⌫ 削除"
+      >
+        <List.EmptyView
+          title="カレンダー取得に失敗しました"
+          description={error}
+          actions={
+            <ActionPanel>
+              <Action
+                title="再読み込み"
+                icon={Icon.ArrowClockwise}
+                onAction={reload}
+              />
+              {addScheduleAction}
+            </ActionPanel>
+          }
+        />
+      </List>
+    );
+  }
+
   return (
     <List
       actions={<ActionPanel>{sharedActionSections}</ActionPanel>}
@@ -322,33 +348,6 @@ const Command = () => {
           ))}
         </List.Section>
       ) : null}
-      <List.Section>
-        {!isLoading &&
-        preferences.enableCalendarSync &&
-        (!preferences.gwsPath.trim() || !preferences.calendarId.trim()) ? (
-          <List.EmptyView
-            title="カレンダー未設定"
-            description="Extension Preferences で gwsPath と calendarId を設定してください"
-            actions={<ActionPanel>{addScheduleAction}</ActionPanel>}
-          />
-        ) : null}
-        {!isLoading && error ? (
-          <List.EmptyView
-            title="カレンダー取得に失敗しました"
-            description={error}
-            actions={
-              <ActionPanel>
-                <Action
-                  title="再読み込み"
-                  icon={Icon.ArrowClockwise}
-                  onAction={reload}
-                />
-                {addScheduleAction}
-              </ActionPanel>
-            }
-          />
-        ) : null}
-      </List.Section>
     </List>
   );
 };
