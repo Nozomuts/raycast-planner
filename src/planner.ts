@@ -18,8 +18,9 @@ export const mergeEventsWithOverlay = (
     .map((event) => {
       const overlay = overlayMap[event.id] ?? {};
       const joinLink = getPreferredJoinLink(event.links);
-      const completed = overlay.completed ?? isEventPast(event);
       const isAnytime = event.anytime ?? false;
+      const completed =
+        overlay.completed ?? (isAnytime ? false : isEventPast(event));
       const isAllDay = event.isAllDay || isLocalAllDayEvent(event);
       return {
         ...event,
