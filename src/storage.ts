@@ -44,16 +44,21 @@ const SHARED_NOTES_FILE = "memo.md";
 const SNAPSHOT_DIRECTORY = "snapshots";
 const SNAPSHOT_INTERVAL = 10;
 const SNAPSHOT_KEEP_COUNT = 20;
+// sqlite CLI の busy_timeout に加えて、短い再試行で一時的な locked を吸収する。
+const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_BINARIES = [
   "/usr/bin/sqlite3",
   "/opt/homebrew/bin/sqlite3",
   "/usr/local/bin/sqlite3",
 ];
+const SQLITE_LOCK_RETRY_COUNT = 3;
+const SQLITE_LOCK_RETRY_DELAY_MS = 150;
 const cache = new Cache();
 const execFileAsync = promisify(execFile);
 
 let databasePromise: Promise<void> | undefined;
 let migrationPromise: Promise<void> | undefined;
+let sqliteQueue: Promise<void> = Promise.resolve();
 
 type CachedEventsMeta = {
   cachedAt: string;
@@ -293,6 +298,8 @@ const ensurePlannerDataMigrated = async () => {
 
 const ensurePlannerDatabase = async () => {
   databasePromise ??= runSqlite(`
+    -- 読み書き競合を緩和するため WAL を有効化する。
+    PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS ${PLANNER_KV_TABLE} (
       key TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,
@@ -410,23 +417,30 @@ const writePlannerState = async (
 ) => {
   await ensurePlannerDataMigrated();
   const state = await loadPlannerState(partial);
-  await Promise.all([
+  const statements = [
     partial.notesByDay !== undefined
-      ? saveSqliteJson(NOTES_BY_DAY_KEY, state.notesByDay)
-      : undefined,
+      ? saveSqliteJsonStatement(NOTES_BY_DAY_KEY, state.notesByDay)
+      : "",
     partial.localEvents !== undefined
-      ? saveSqliteJson(LOCAL_EVENTS_KEY, dedupeLocalEvents(state.localEvents))
-      : undefined,
+      ? saveSqliteJsonStatement(
+          LOCAL_EVENTS_KEY,
+          dedupeLocalEvents(state.localEvents),
+        )
+      : "",
     partial.overlayMap !== undefined
-      ? saveSqliteJson(OVERLAYS_KEY, state.overlayMap)
-      : undefined,
+      ? saveSqliteJsonStatement(OVERLAYS_KEY, state.overlayMap)
+      : "",
     partial.fetchedGoogleEventsByDay !== undefined
-      ? saveSqliteJson(
+      ? saveSqliteJsonStatement(
           FETCHED_GOOGLE_EVENTS_KEY,
           state.fetchedGoogleEventsByDay,
         )
-      : undefined,
-  ]);
+      : "",
+  ].filter(Boolean);
+
+  if (statements.length) {
+    await runSqlite(`BEGIN IMMEDIATE;\n${statements.join("\n")}\nCOMMIT;`);
+  }
   await finalizePlannerWrite(entry, state);
 };
 
@@ -894,8 +908,12 @@ const loadSqliteJson = async <T>(key: string, fallback: T): Promise<T> => {
 
 const saveSqliteJson = async (key: string, value: unknown) => {
   await ensurePlannerDatabase();
+  await runSqlite(saveSqliteJsonStatement(key, value));
+};
+
+const saveSqliteJsonStatement = (key: string, value: unknown) => {
   const timestamp = new Date().toISOString();
-  await runSqlite(`
+  return `
     INSERT INTO ${PLANNER_KV_TABLE} (key, value_json, updated_at)
     VALUES (
       ${sqlValue(key)},
@@ -905,7 +923,7 @@ const saveSqliteJson = async (key: string, value: unknown) => {
     ON CONFLICT(key) DO UPDATE SET
       value_json = excluded.value_json,
       updated_at = excluded.updated_at;
-  `);
+  `;
 };
 
 const querySqliteJson = async <T>(sql: string): Promise<T[]> => {
@@ -941,35 +959,77 @@ const sqliteExecutablePath = async (): Promise<string> => {
 };
 
 const execSqlite = async (args: string[], sql: string): Promise<string> =>
-  await new Promise((resolve, reject) => {
-    void sqliteExecutablePath().then((sqlitePath) => {
-      const child = spawn(sqlitePath, args, {
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      let stdout = "";
-      let stderr = "";
+  await queueSqlite(
+    async () =>
+      await retryLockedSqlite(
+        async () =>
+          await new Promise((resolve, reject) => {
+            void sqliteExecutablePath().then((sqlitePath) => {
+              const child = spawn(sqlitePath, args, {
+                stdio: ["pipe", "pipe", "pipe"],
+              });
+              let stdout = "";
+              let stderr = "";
 
-      child.stdout.on("data", (chunk) => {
-        stdout += String(chunk);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr += String(chunk);
-      });
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code === 0) {
-          resolve(stdout);
-          return;
-        }
+              child.stdout.on("data", (chunk) => {
+                stdout += String(chunk);
+              });
+              child.stderr.on("data", (chunk) => {
+                stderr += String(chunk);
+              });
+              child.on("error", reject);
+              child.on("close", (code) => {
+                if (code === 0) {
+                  resolve(stdout);
+                  return;
+                }
 
-        reject(new Error(stderr.trim() || `sqlite3 exited with code ${code}`));
-      });
-      child.stdin.end(sql);
-    }, reject);
-  });
+                reject(
+                  new Error(
+                    stderr.trim() || `sqlite3 exited with code ${code}`,
+                  ),
+                );
+              });
+              child.stdin.end(`.timeout ${SQLITE_BUSY_TIMEOUT_MS}\n${sql}`);
+            }, reject);
+          }),
+      ),
+  );
 
 const formatExecError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const retryLockedSqlite = async <T>(run: () => Promise<T>): Promise<T> => {
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return await run();
+    } catch (error) {
+      if (
+        !formatExecError(error).includes("database is locked") ||
+        attempt >= SQLITE_LOCK_RETRY_COUNT
+      ) {
+        throw error;
+      }
+
+      attempt += 1;
+      await new Promise((resolve) =>
+        setTimeout(resolve, SQLITE_LOCK_RETRY_DELAY_MS * attempt),
+      );
+    }
+  }
+};
+
+const queueSqlite = async <T>(run: () => Promise<T>): Promise<T> => {
+  // sqlite3 CLI を使う自前アクセスは 1 本ずつ流して lock 競合を避ける。
+  const task = sqliteQueue.then(run, run);
+  sqliteQueue = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return await task;
+};
 
 const hasSqliteNoteHistory = async (): Promise<boolean> => {
   const rows = await querySqliteJson<{ count: number }>(
