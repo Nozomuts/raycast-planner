@@ -10,6 +10,7 @@ import {
   showToast,
   Toast,
 } from "@raycast/api";
+import { useSQL } from "@raycast/utils";
 import { useEffect, useRef, useState } from "react";
 
 import { getDayRange } from "./date";
@@ -17,27 +18,54 @@ import { normalizeMemoForSave, renderMemoMarkdown } from "./memo-markdown";
 import {
   appendSharedNoteHistory,
   ensurePlannerDataFile,
-  loadSharedNote,
+  ensurePlannerStorageReady,
+  getPlannerDatabasePath,
   saveSharedNote,
 } from "./storage";
 
+type SqliteValueRow = {
+  value_json: string;
+};
+
+const NOTES_BY_DAY_KEY = "planner.notes-by-day.v1";
+
 const Command = () => {
   const { dayKey, label } = getDayRange(new Date());
-  const [isLoading, setIsLoading] = useState(true);
-  const [savedNote, setSavedNote] = useState("");
+  const [isStorageReady, setIsStorageReady] = useState(false);
   const [previewNote, setPreviewNote] = useState("");
   const [isShowingPreview, setIsShowingPreview] = useState(false);
   const noteRef = useRef("");
   const openPlannerFile = () => void ensurePlannerDataFile().then(open);
+  const noteSql = useSQL<SqliteValueRow>(
+    getPlannerDatabasePath(),
+    `SELECT value_json FROM planner_kv WHERE key = '${NOTES_BY_DAY_KEY}' LIMIT 1`,
+    { execute: isStorageReady },
+  );
+  let savedNote = "";
+  try {
+    savedNote =
+      (
+        JSON.parse(noteSql.data?.[0]?.value_json ?? "{}") as Record<
+          string,
+          string
+        >
+      )[dayKey] ?? "";
+  } catch {}
 
   useEffect(() => {
-    void loadSharedMemo(dayKey).then((value) => {
-      setSavedNote(value);
-      setPreviewNote(value);
-      noteRef.current = value;
-      setIsLoading(false);
+    void ensurePlannerStorageReady().then(() => {
+      setIsStorageReady(true);
     });
-  }, [dayKey]);
+  }, []);
+
+  useEffect(() => {
+    noteRef.current = savedNote;
+    setPreviewNote(savedNote);
+  }, [savedNote]);
+
+  if (noteSql.permissionView) {
+    return noteSql.permissionView;
+  }
 
   if (isShowingPreview) {
     return (
@@ -73,10 +101,10 @@ const Command = () => {
             shortcut={{ modifiers: ["cmd"], key: "s" }}
             onSubmit={(values) =>
               void saveSharedMemo(
+                noteSql.mutate,
                 dayKey,
                 savedNote,
                 values.memo,
-                setSavedNote,
                 setPreviewNote,
               )
             }
@@ -97,10 +125,10 @@ const Command = () => {
           />
         </ActionPanel>
       }
-      isLoading={isLoading}
+      isLoading={!isStorageReady || noteSql.isLoading}
       navigationTitle={`${label} のメモ`}
     >
-      {!isLoading ? (
+      {isStorageReady && !noteSql.isLoading ? (
         <Form.TextArea
           defaultValue={savedNote}
           enableMarkdown
@@ -117,24 +145,25 @@ const Command = () => {
 
 export default Command;
 
-const loadSharedMemo = async (dayKey: string) => await loadSharedNote(dayKey);
-
 const saveSharedMemo = async (
+  mutate: ReturnType<typeof useSQL<SqliteValueRow>>["mutate"],
   dayKey: string,
   previousNote: string,
   nextNote: string,
-  onSaved: (note: string) => void,
   setPreviewNote: (note: string) => void,
 ) => {
   const normalizedNote = await normalizeMemoForSave(nextNote);
-  await saveSharedNote(dayKey, normalizedNote);
-  await appendSharedNoteHistory({
-    after: normalizedNote,
-    before: previousNote,
-    dayKey,
-    timestamp: new Date().toISOString(),
-  });
-  onSaved(normalizedNote);
+  await mutate(
+    (async () => {
+      await saveSharedNote(dayKey, normalizedNote);
+      await appendSharedNoteHistory({
+        after: normalizedNote,
+        before: previousNote,
+        dayKey,
+        timestamp: new Date().toISOString(),
+      });
+    })(),
+  );
   setPreviewNote(normalizedNote);
   await showToast({
     style: Toast.Style.Success,

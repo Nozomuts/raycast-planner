@@ -12,7 +12,8 @@ import {
   Toast,
   useNavigation,
 } from "@raycast/api";
-import { useEffect, useMemo, useState } from "react";
+import { useSQL } from "@raycast/utils";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import {
   formatDateOnlyLabel,
@@ -31,11 +32,9 @@ import {
   appendSharedNoteHistory,
   clearCachedEvents,
   ensurePlannerDataFile,
+  ensurePlannerStorageReady,
+  getPlannerDatabasePath,
   loadAutoOpenState,
-  loadLocalEvents,
-  loadOverlayMap,
-  loadSharedNote,
-  loadSharedNoteHistory,
   saveAutoOpenState,
   saveFetchedGoogleEvents,
   saveLocalEvents,
@@ -51,21 +50,58 @@ import type {
   SharedNoteHistoryEntry,
 } from "./types";
 
+type SqliteKeyValueRow = {
+  key: string;
+  value_json: string;
+};
+
+type SqliteHistoryRow = SharedNoteHistoryEntry;
+type PlannerSqlMutate = ReturnType<typeof useSQL<SqliteKeyValueRow>>["mutate"];
+
+const PLANNER_KV_QUERY = `SELECT key, value_json FROM planner_kv WHERE key IN ('planner.notes-by-day.v1', 'planner.local-events.v1', 'planner.overlays.v1')`;
+const PLANNER_NOTE_HISTORY_QUERY = `SELECT day_key AS dayKey, before_text AS before, after_text AS after, created_at AS timestamp FROM planner_note_history ORDER BY created_at DESC LIMIT 200`;
+
 const Command = () => {
   const preferences = getPreferenceValues<PlannerPreferences>();
+  const gwsPath = preferences.gwsPath.trim();
+  const calendarId = preferences.calendarId.trim();
   const { push } = useNavigation();
   const [events, setEvents] = useState<PlannerEventViewModel[]>([]);
-  const [sharedNote, setSharedNote] = useState("");
   const [targetDate, setTargetDate] = useState(new Date());
+  const [isStorageReady, setIsStorageReady] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [lastSource, setLastSource] = useState<"cache" | "local" | "remote">(
-    preferences.gwsPath.trim() && preferences.calendarId.trim()
-      ? "remote"
-      : "local",
+    gwsPath && calendarId ? "remote" : "local",
   );
-  const canSyncCalendar =
-    preferences.gwsPath.trim() && preferences.calendarId.trim();
+  const canSyncCalendar = gwsPath && calendarId;
+  const plannerSql = useSQL<SqliteKeyValueRow>(
+    getPlannerDatabasePath(),
+    PLANNER_KV_QUERY,
+    { execute: isStorageReady },
+  );
+
+  const plannerState = useMemo(() => {
+    const values = Object.fromEntries(
+      (plannerSql.data ?? []).map((row) => {
+        try {
+          return [row.key, JSON.parse(row.value_json)];
+        } catch {
+          return [row.key, undefined];
+        }
+      }),
+    ) as {
+      "planner.local-events.v1"?: LocalPlannerEvent[];
+      "planner.notes-by-day.v1"?: Record<string, string>;
+      "planner.overlays.v1"?: Record<string, PlannerOverlay>;
+    };
+
+    return {
+      localEvents: values["planner.local-events.v1"] ?? [],
+      notesByDay: values["planner.notes-by-day.v1"] ?? {},
+      overlayMap: values["planner.overlays.v1"] ?? {},
+    };
+  }, [plannerSql.data]);
 
   const load = async (forceRefresh = false, date = targetDate) => {
     setIsLoading(true);
@@ -73,18 +109,13 @@ const Command = () => {
     const { dayKey } = getDayRange(date);
 
     try {
-      const [result, overlayMap, localEvents, note] = await Promise.all([
-        canSyncCalendar
-          ? fetchCalendarEvents(preferences, date, { forceRefresh })
-          : Promise.resolve<FetchResult>({
-              events: [],
-              source: "local",
-            }),
-        loadOverlayMap(),
-        loadLocalEvents(),
-        loadSharedNote(dayKey),
-      ]);
-      const visibleLocalEvents = localEvents.filter((event) => {
+      const result = canSyncCalendar
+        ? await fetchCalendarEvents(preferences, date, { forceRefresh })
+        : ({
+            events: [],
+            source: "local",
+          } satisfies FetchResult);
+      const visibleLocalEvents = plannerState.localEvents.filter((event) => {
         const createdAtDayKey = getDayRange(
           new Date(event.createdAt ?? event.start),
         ).dayKey;
@@ -100,13 +131,12 @@ const Command = () => {
 
       const nextEvents = mergeEventsWithOverlay(
         result.events,
-        overlayMap,
+        plannerState.overlayMap,
         visibleLocalEvents,
         date,
       );
 
       setEvents(nextEvents);
-      setSharedNote(note);
       setLastSource(result.source);
     } catch (loadError) {
       setError(toErrorMessage(loadError));
@@ -117,8 +147,18 @@ const Command = () => {
   };
 
   useEffect(() => {
+    void ensurePlannerStorageReady().then(() => {
+      setIsStorageReady(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isStorageReady || plannerSql.isLoading) {
+      return;
+    }
+
     void load(false, targetDate);
-  }, [targetDate]);
+  }, [isStorageReady, plannerSql.isLoading, plannerState, targetDate]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -133,6 +173,7 @@ const Command = () => {
     () => getDayRange(targetDate),
     [targetDate],
   );
+  const sharedNote = plannerState.notesByDay[dayKey] ?? "";
   const { completedEvents, floatingEvents, timedEvents } = useMemo(() => {
     const grouped = {
       completedEvents: [] as PlannerEventViewModel[],
@@ -170,10 +211,12 @@ const Command = () => {
           : "live";
     return `${label} (${suffix})`;
   }, [label, lastSource]);
-  const reload = () => void load(true);
+  const reload = () => void load(true, targetDate);
   const sync = () =>
     canSyncCalendar
-      ? void handleSync(preferences, targetDate, load)
+      ? void handleSync(preferences, targetDate, (forceRefresh, date) =>
+          load(forceRefresh, date),
+        )
       : undefined;
   const movePreviousDay = () =>
     setTargetDate((current) => shiftDate(current, -1));
@@ -184,9 +227,10 @@ const Command = () => {
   const openCreateForm = () =>
     push(
       <LocalEventForm
+        localEvents={plannerState.localEvents}
         mode="create"
+        mutate={plannerSql.mutate}
         selectedDate={targetDate}
-        onSaved={reload}
       />,
     );
   const openSharedNoteForm = () =>
@@ -196,7 +240,15 @@ const Command = () => {
         initialValue={sharedNote}
         multiline
         navigationTitle={`${label} のメモ`}
-        onSubmit={(text) => saveCommonNote(dayKey, sharedNote, text, reload)}
+        onSubmit={(text) =>
+          saveCommonNote(
+            plannerSql.mutate,
+            plannerState.notesByDay,
+            dayKey,
+            sharedNote,
+            text,
+          )
+        }
       />,
     );
   const showTodayAction = !isToday(targetDate);
@@ -232,6 +284,20 @@ const Command = () => {
       ) : null}
     </>
   );
+  const globalActionSection = (
+    <ActionPanel.Section title="全体">
+      {addScheduleAction}
+      {canSyncCalendar ? (
+        <Action
+          title="カレンダーと同期"
+          icon={Icon.ArrowClockwise}
+          shortcut={{ modifiers: ["cmd"], key: "r" }}
+          onAction={sync}
+        />
+      ) : null}
+      {dateMoveActions}
+    </ActionPanel.Section>
+  );
   const sharedActionSections = (
     <>
       <ActionPanel.Section title="メモ">
@@ -252,29 +318,30 @@ const Command = () => {
           onAction={openPlannerFile}
         />
       </ActionPanel.Section>
-      <ActionPanel.Section title="全体">
-        {addScheduleAction}
-        {canSyncCalendar ? (
-          <Action
-            title="カレンダーと同期"
-            icon={Icon.ArrowClockwise}
-            shortcut={{ modifiers: ["cmd"], key: "r" }}
-            onAction={sync}
-          />
-        ) : null}
-        {dateMoveActions}
-      </ActionPanel.Section>
+      {globalActionSection}
     </>
   );
+  const rootActions = <ActionPanel>{sharedActionSections}</ActionPanel>;
+  const listProps = {
+    actions: rootActions,
+    isShowingDetail: true,
+    navigationTitle,
+    searchBarPlaceholder:
+      "⌘← 前日, ⌘→ 翌日, ⌘↑ 今日, ⌘N 追加, ⌘D 完了, ⌘M メモ編集, ⌘R 同期, ⌘⌫ 削除",
+  } as const;
+  const eventSections = [
+    { events: timedEvents, title: label },
+    { events: floatingEvents, title: "日跨ぎ・日時指定なし" },
+    { events: completedEvents, title: "完了" },
+  ].filter(({ events, title }) => title === label || events.length);
+
+  if (plannerSql.permissionView) {
+    return plannerSql.permissionView;
+  }
 
   if (!isLoading && error) {
     return (
-      <List
-        actions={<ActionPanel>{sharedActionSections}</ActionPanel>}
-        isShowingDetail
-        navigationTitle={navigationTitle}
-        searchBarPlaceholder="⌘← 前日, ⌘→ 翌日, ⌘↑ 今日, ⌘N 追加, ⌘D 完了, ⌘M メモ編集, ⌘R 同期, ⌘⌫ 削除"
-      >
+      <List {...listProps}>
         <List.EmptyView
           title="カレンダー取得に失敗しました"
           description={error}
@@ -294,71 +361,35 @@ const Command = () => {
   }
 
   return (
-    <List
-      actions={<ActionPanel>{sharedActionSections}</ActionPanel>}
-      isLoading={isLoading}
-      isShowingDetail
-      navigationTitle={navigationTitle}
-      searchBarPlaceholder="⌘← 前日, ⌘→ 翌日, ⌘↑ 今日, ⌘N 追加, ⌘D 完了, ⌘M メモ編集, ⌘R 同期, ⌘⌫ 削除"
-    >
-      <List.Section title={label}>
-        <List.Item
-          icon={Icon.Document}
-          title="メモ"
-          subtitle={sharedNote ? "保存済み" : "未入力"}
-          accessories={
-            sharedNote ? [{ icon: Icon.Document, tooltip: "メモあり" }] : []
-          }
-          detail={
-            <List.Item.Detail markdown={renderMemoMarkdown(sharedNote)} />
-          }
-          actions={<ActionPanel>{sharedActionSections}</ActionPanel>}
-        />
-        {timedEvents.map((event) => (
-          <EventListItem
-            event={event}
-            key={event.id}
-            onChanged={reload}
-            onNextDay={moveNextDay}
-            onPreviousDay={movePreviousDay}
-            onSync={sync}
-            onToday={moveToday}
-            targetDate={targetDate}
-          />
-        ))}
-      </List.Section>
-      {floatingEvents.length ? (
-        <List.Section title="日跨ぎ・日時指定なし">
-          {floatingEvents.map((event) => (
+    <List {...listProps} isLoading={isLoading}>
+      {eventSections.map(({ events: sectionEvents, title: sectionTitle }) => (
+        <List.Section key={sectionTitle} title={sectionTitle}>
+          {sectionTitle === label ? (
+            <List.Item
+              icon={Icon.Document}
+              title="メモ"
+              subtitle={sharedNote ? "保存済み" : "未入力"}
+              accessories={
+                sharedNote ? [{ icon: Icon.Document, tooltip: "メモあり" }] : []
+              }
+              detail={
+                <List.Item.Detail markdown={renderMemoMarkdown(sharedNote)} />
+              }
+              actions={rootActions}
+            />
+          ) : null}
+          {sectionEvents.map((event) => (
             <EventListItem
               event={event}
               key={event.id}
-              onChanged={reload}
-              onNextDay={moveNextDay}
-              onPreviousDay={movePreviousDay}
-              onSync={sync}
-              onToday={moveToday}
-              targetDate={targetDate}
+              globalActionSection={globalActionSection}
+              localEvents={plannerState.localEvents}
+              mutate={plannerSql.mutate}
+              overlayMap={plannerState.overlayMap}
             />
           ))}
         </List.Section>
-      ) : null}
-      {completedEvents.length ? (
-        <List.Section title="完了">
-          {completedEvents.map((event) => (
-            <EventListItem
-              event={event}
-              key={event.id}
-              onChanged={reload}
-              onNextDay={moveNextDay}
-              onPreviousDay={movePreviousDay}
-              onSync={sync}
-              onToday={moveToday}
-              targetDate={targetDate}
-            />
-          ))}
-        </List.Section>
-      ) : null}
+      ))}
     </List>
   );
 };
@@ -367,20 +398,16 @@ export default Command;
 
 const EventListItem = ({
   event,
-  onChanged,
-  onNextDay,
-  onPreviousDay,
-  onSync,
-  onToday,
-  targetDate,
+  globalActionSection,
+  localEvents,
+  mutate,
+  overlayMap,
 }: {
   event: PlannerEventViewModel;
-  onChanged: () => void;
-  onNextDay: () => void;
-  onPreviousDay: () => void;
-  onSync: () => void;
-  onToday: () => void;
-  targetDate: Date;
+  globalActionSection: ReactNode;
+  localEvents: LocalPlannerEvent[];
+  mutate: PlannerSqlMutate;
+  overlayMap: Record<string, PlannerOverlay>;
 }) => {
   const { push } = useNavigation();
   const dateLabel = formatDateOnlyLabel(event.start);
@@ -391,8 +418,7 @@ const EventListItem = ({
     event.isAnytime,
   );
   const statusLabel = event.completed ? "完了" : "予定";
-  const title = event.title;
-  const baseIcon =
+  const icon =
     event.source === "local"
       ? Icon.Dot
       : event.joinLink?.type === "ovice"
@@ -400,23 +426,15 @@ const EventListItem = ({
         : event.joinLink
           ? Icon.Video
           : Icon.Calendar;
-  const icon = baseIcon;
-  const openCreateForm = () =>
-    push(
-      <LocalEventForm
-        mode="create"
-        selectedDate={targetDate}
-        onSaved={onChanged}
-      />,
-    );
   const openEditForm = () =>
     event.source === "local"
       ? push(
           <LocalEventForm
             event={event}
+            localEvents={localEvents}
             mode="edit"
+            mutate={mutate}
             selectedDate={new Date(event.start)}
-            onSaved={onChanged}
           />,
         )
       : push(
@@ -425,11 +443,17 @@ const EventListItem = ({
             fieldTitle="タイトル"
             initialValue={event.title === event.summary ? "" : event.title}
             navigationTitle="タイトルを編集"
-            onSubmit={(text) => saveTitleOverride(event.id, text, onChanged)}
+            onSubmit={(text) =>
+              updateOverlay(mutate, overlayMap, event.id, {
+                titleOverride: text,
+              })
+            }
           />,
         );
   const toggleCompleted = () =>
     void updateOverlay(
+      mutate,
+      overlayMap,
       event.id,
       event.completed
         ? { completed: false, completedAt: undefined }
@@ -437,60 +461,20 @@ const EventListItem = ({
             completed: true,
             completedAt: new Date().toISOString(),
           },
-      onChanged,
     );
   const toggleAutoOpen = () =>
-    void updateOverlay(
-      event.id,
-      { autoOpenJoin: !event.autoOpenJoin },
-      onChanged,
-    );
+    void updateOverlay(mutate, overlayMap, event.id, {
+      autoOpenJoin: !event.autoOpenJoin,
+    });
   const deleteEvent = () =>
     void (event.source === "local"
-      ? deleteLocalEvent(event.id, onChanged)
-      : updateOverlay(event.id, { hidden: true }, onChanged));
-  const showTodayAction = !isToday(targetDate);
-  const globalActionSection = (
-    <ActionPanel.Section title="全体">
-      <Action
-        title="予定を追加"
-        icon={Icon.Plus}
-        shortcut={{ modifiers: ["cmd"], key: "n" }}
-        onAction={openCreateForm}
-      />
-      <Action
-        title="カレンダーと同期"
-        icon={Icon.ArrowClockwise}
-        shortcut={{ modifiers: ["cmd"], key: "r" }}
-        onAction={onSync}
-      />
-      <Action
-        title="前日へ"
-        icon={Icon.ArrowLeft}
-        shortcut={{ modifiers: ["cmd"], key: "arrowLeft" }}
-        onAction={onPreviousDay}
-      />
-      <Action
-        title="翌日へ"
-        icon={Icon.ArrowRight}
-        shortcut={{ modifiers: ["cmd"], key: "arrowRight" }}
-        onAction={onNextDay}
-      />
-      {showTodayAction ? (
-        <Action
-          title="今日へ戻る"
-          icon={Icon.Calendar}
-          shortcut={{ modifiers: ["cmd"], key: "arrowUp" }}
-          onAction={onToday}
-        />
-      ) : null}
-    </ActionPanel.Section>
-  );
+      ? deleteLocalEvent(mutate, localEvents, event.id)
+      : updateOverlay(mutate, overlayMap, event.id, { hidden: true }));
 
   return (
     <List.Item
       icon={icon}
-      title={title}
+      title={event.title}
       subtitle={timeLabel}
       detail={
         <List.Item.Detail
@@ -645,6 +629,7 @@ const TextValueForm = ({
 }) => {
   const { pop } = useNavigation();
   const [text, setText] = useState(initialValue);
+  const submit = () => void onSubmit(text).then(() => pop());
 
   return (
     <Form
@@ -654,11 +639,7 @@ const TextValueForm = ({
           <Action.SubmitForm
             title="保存"
             icon={Icon.Checkmark}
-            onSubmit={() =>
-              void onSubmit(text).then(async () => {
-                await pop();
-              })
-            }
+            onSubmit={submit}
           />
         </ActionPanel>
       }
@@ -687,13 +668,15 @@ const TextValueForm = ({
 
 const LocalEventForm = ({
   event,
+  localEvents,
   mode,
-  onSaved,
+  mutate,
   selectedDate,
 }: {
   event?: PlannerEventViewModel;
+  localEvents: LocalPlannerEvent[];
   mode: "create" | "edit";
-  onSaved: () => void;
+  mutate: PlannerSqlMutate;
   selectedDate: Date;
 }) => {
   const { pop } = useNavigation();
@@ -708,32 +691,24 @@ const LocalEventForm = ({
   const [end, setEnd] = useState<Date>(
     new Date(event?.end ?? defaultEndTime(selectedDate)),
   );
+  const submit = () =>
+    void saveLocalEvent(mutate, localEvents, {
+      anytime,
+      description,
+      end,
+      existingId: event?.id,
+      location,
+      start,
+      title,
+      url,
+    }).then(() => pop());
 
   return (
     <Form
       navigationTitle={mode === "create" ? "予定を追加" : "ローカル予定を編集"}
       actions={
         <ActionPanel>
-          <Action.SubmitForm
-            title="保存"
-            onSubmit={() =>
-              void saveLocalEvent(
-                {
-                  anytime,
-                  description,
-                  end,
-                  existingId: event?.id,
-                  location,
-                  start,
-                  title,
-                  url,
-                },
-                onSaved,
-              ).then(async () => {
-                await pop();
-              })
-            }
-          />
+          <Action.SubmitForm title="保存" onSubmit={submit} />
         </ActionPanel>
       }
     >
@@ -785,15 +760,18 @@ const LocalEventForm = ({
 };
 
 const SharedNoteHistoryList = () => {
-  const [history, setHistory] = useState<SharedNoteHistoryEntry[]>([]);
+  const historySql = useSQL<SqliteHistoryRow>(
+    getPlannerDatabasePath(),
+    PLANNER_NOTE_HISTORY_QUERY,
+  );
 
-  useEffect(() => {
-    void loadSharedNoteHistory().then(setHistory);
-  }, []);
+  if (historySql.permissionView) {
+    return historySql.permissionView;
+  }
 
   return (
-    <List navigationTitle="メモ更新履歴">
-      {history.map((entry, index) => (
+    <List isLoading={historySql.isLoading} navigationTitle="メモ更新履歴">
+      {(historySql.data ?? []).map((entry, index) => (
         <List.Item
           key={`${entry.timestamp}-${index}`}
           icon={Icon.Clock}
@@ -810,7 +788,52 @@ const SharedNoteHistoryList = () => {
   );
 };
 
+const updatePlannerSqlRows = (
+  rows: SqliteKeyValueRow[] | undefined,
+  key: string,
+  value: unknown,
+): SqliteKeyValueRow[] => {
+  const nextRow = {
+    key,
+    value_json: JSON.stringify(value),
+  };
+  const currentRows = rows ?? [];
+  const index = currentRows.findIndex((row) => row.key === key);
+
+  if (index === -1) {
+    return [...currentRows, nextRow];
+  }
+
+  return currentRows.map((row, currentIndex) =>
+    currentIndex === index ? nextRow : row,
+  );
+};
+
+const dedupeLocalEvents = (
+  events: LocalPlannerEvent[],
+): LocalPlannerEvent[] => [
+  ...new Map(events.map((event) => [event.id, event])).values(),
+];
+
+const mutateLocalEvents = async (
+  mutate: PlannerSqlMutate,
+  nextEvents: LocalPlannerEvent[],
+) => {
+  const uniqueEvents = dedupeLocalEvents(nextEvents);
+  await mutate(saveLocalEvents(uniqueEvents), {
+    optimisticUpdate(data) {
+      return updatePlannerSqlRows(
+        data,
+        "planner.local-events.v1",
+        uniqueEvents,
+      );
+    },
+  });
+};
+
 const saveLocalEvent = async (
+  mutate: PlannerSqlMutate,
+  localEvents: LocalPlannerEvent[],
   input: {
     anytime: boolean;
     description: string;
@@ -821,9 +844,7 @@ const saveLocalEvent = async (
     title: string;
     url: string;
   },
-  onSaved: () => void,
 ) => {
-  const localEvents = await loadLocalEvents();
   const localEvent: LocalPlannerEvent = {
     anytime: input.anytime,
     attendees: [],
@@ -852,53 +873,72 @@ const saveLocalEvent = async (
         event.id === input.existingId ? localEvent : event,
       )
     : [...localEvents, localEvent];
-  await saveLocalEvents(nextEvents);
-  onSaved();
+  await mutateLocalEvents(mutate, nextEvents);
 };
 
-const deleteLocalEvent = async (eventId: string, onChanged: () => void) => {
-  const events = await loadLocalEvents();
-  await saveLocalEvents(events.filter((event) => event.id !== eventId));
-  onChanged();
+const deleteLocalEvent = async (
+  mutate: PlannerSqlMutate,
+  localEvents: LocalPlannerEvent[],
+  eventId: string,
+) => {
+  const nextEvents = localEvents.filter((event) => event.id !== eventId);
+  await mutateLocalEvents(mutate, nextEvents);
 };
 
 const saveCommonNote = async (
+  mutate: PlannerSqlMutate,
+  notesByDay: Record<string, string>,
   dayKey: string,
   previousNote: string,
   nextNote: string,
-  onSaved: () => void,
 ) => {
   const normalizedNote = await normalizeMemoForSave(nextNote);
-  await saveSharedNote(dayKey, normalizedNote);
-  await appendSharedNoteHistory({
-    after: normalizedNote,
-    before: previousNote,
-    dayKey,
-    timestamp: new Date().toISOString(),
-  });
-  onSaved();
-};
-
-const saveTitleOverride = async (
-  eventId: string,
-  value: string,
-  onSaved: () => void,
-) => {
-  await updateOverlay(eventId, { titleOverride: value }, onSaved);
+  const nextNotesByDay = { ...notesByDay };
+  if (normalizedNote.trim()) {
+    nextNotesByDay[dayKey] = normalizedNote;
+  } else {
+    delete nextNotesByDay[dayKey];
+  }
+  await mutate(
+    (async () => {
+      await saveSharedNote(dayKey, normalizedNote);
+      await appendSharedNoteHistory({
+        after: normalizedNote,
+        before: previousNote,
+        dayKey,
+        timestamp: new Date().toISOString(),
+      });
+    })(),
+    {
+      optimisticUpdate(data) {
+        return updatePlannerSqlRows(
+          data,
+          "planner.notes-by-day.v1",
+          nextNotesByDay,
+        );
+      },
+    },
+  );
 };
 
 const updateOverlay = async (
+  mutate: PlannerSqlMutate,
+  overlayMap: Record<string, PlannerOverlay>,
   eventId: string,
   patch: Partial<PlannerOverlay>,
-  onChanged: () => void,
 ) => {
-  const overlays = await loadOverlayMap();
-  overlays[eventId] = {
-    ...overlays[eventId],
-    ...patch,
+  const nextOverlayMap = {
+    ...overlayMap,
+    [eventId]: {
+      ...overlayMap[eventId],
+      ...patch,
+    },
   };
-  await saveOverlayMap(overlays);
-  onChanged();
+  await mutate(saveOverlayMap(nextOverlayMap), {
+    optimisticUpdate(data) {
+      return updatePlannerSqlRows(data, "planner.overlays.v1", nextOverlayMap);
+    },
+  });
 };
 
 const handleSync = async (
