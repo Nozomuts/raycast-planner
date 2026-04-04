@@ -760,6 +760,22 @@ const LocalEventForm = ({
 };
 
 const SharedNoteHistoryList = () => {
+  const [isStorageReady, setIsStorageReady] = useState(false);
+
+  useEffect(() => {
+    void ensurePlannerStorageReady().then(() => {
+      setIsStorageReady(true);
+    });
+  }, []);
+
+  if (!isStorageReady) {
+    return <List isLoading navigationTitle="メモ更新履歴" />;
+  }
+
+  return <SharedNoteHistoryListBody />;
+};
+
+const SharedNoteHistoryListBody = () => {
   const historySql = useSQL<SqliteHistoryRow>(
     getPlannerDatabasePath(),
     PLANNER_NOTE_HISTORY_QUERY,

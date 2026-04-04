@@ -30,8 +30,23 @@ type SqliteValueRow = {
 const NOTES_BY_DAY_KEY = "planner.notes-by-day.v1";
 
 const Command = () => {
-  const { dayKey, label } = getDayRange(new Date());
   const [isStorageReady, setIsStorageReady] = useState(false);
+
+  useEffect(() => {
+    void ensurePlannerStorageReady().then(() => {
+      setIsStorageReady(true);
+    });
+  }, []);
+
+  if (!isStorageReady) {
+    return <Form isLoading navigationTitle="今日のメモ" />;
+  }
+
+  return <MemoForm />;
+};
+
+const MemoForm = () => {
+  const { dayKey, label } = getDayRange(new Date());
   const [previewNote, setPreviewNote] = useState("");
   const [isShowingPreview, setIsShowingPreview] = useState(false);
   const noteRef = useRef("");
@@ -39,7 +54,6 @@ const Command = () => {
   const noteSql = useSQL<SqliteValueRow>(
     getPlannerDatabasePath(),
     `SELECT value_json FROM planner_kv WHERE key = '${NOTES_BY_DAY_KEY}' LIMIT 1`,
-    { execute: isStorageReady },
   );
   let savedNote = "";
   try {
@@ -51,12 +65,6 @@ const Command = () => {
         >
       )[dayKey] ?? "";
   } catch {}
-
-  useEffect(() => {
-    void ensurePlannerStorageReady().then(() => {
-      setIsStorageReady(true);
-    });
-  }, []);
 
   useEffect(() => {
     noteRef.current = savedNote;
@@ -125,10 +133,10 @@ const Command = () => {
           />
         </ActionPanel>
       }
-      isLoading={!isStorageReady || noteSql.isLoading}
+      isLoading={noteSql.isLoading}
       navigationTitle={`${label} のメモ`}
     >
-      {isStorageReady && !noteSql.isLoading ? (
+      {!noteSql.isLoading ? (
         <Form.TextArea
           defaultValue={savedNote}
           enableMarkdown
